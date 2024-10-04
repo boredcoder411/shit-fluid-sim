@@ -1,227 +1,198 @@
-extern crate sdl2;
-
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::Color;
 use sdl2::rect::Rect;
+use sdl2::render::Canvas;
+use sdl2::video::Window;
+use sdl2::Sdl;
 use std::time::Duration;
 
-const WIDTH: usize = 100; // Grid width
-const HEIGHT: usize = 100; // Grid height
-const SCALE: usize = 5; // Cell size in pixels
-const DIFFUSION: f32 = 0.1; // Diffusion rate
-const VISCOSITY: f32 = 0.0001; // Fluid viscosity
+const AIR_DENSITY: f64 = 1.225; // kg/m^3
+const GAMMA_AIR: f64 = 1.4; // Adiabatic index for air
+const ATMOSPHERIC_PRESSURE: f64 = 101325.0; // Pa
+const AIR_ENERGY: f64 = 1000.0; // Initial energy (example)
 
-// Fluid grid struct
-struct Fluid {
-    size: usize,
-    dt: f32,
-    density: Vec<f32>,    // Density of fluid
-    velocity_x: Vec<f32>, // Velocity in x direction
-    velocity_y: Vec<f32>, // Velocity in y direction
+#[derive(Debug, Clone)]
+struct Cell {
+    density: f64,
+    momentum_x: f64,
+    momentum_y: f64,
+    energy: f64,
 }
 
-impl Fluid {
-    fn new(size: usize, dt: f32) -> Self {
-        let total_cells = size * size;
-        Fluid {
-            size,
-            dt,
-            density: vec![0.0; total_cells],
-            velocity_x: vec![0.0; total_cells],
-            velocity_y: vec![0.0; total_cells],
-        }
-    }
-
-    // Adds density to the fluid at position (x, y)
-    fn add_density(&mut self, x: usize, y: usize, amount: f32) {
-        let idx = self.index(x, y);
-        self.density[idx] += amount;
-    }
-
-    // Adds velocity to the fluid at position (x, y)
-    fn add_velocity(&mut self, x: usize, y: usize, amount_x: f32, amount_y: f32) {
-        let idx = self.index(x, y);
-        self.velocity_x[idx] += amount_x;
-        self.velocity_y[idx] += amount_y;
-    }
-
-    // Update the fluid state (advection, diffusion, pressure solve, etc.)
-    fn step(&mut self) {
-        // Simple advection and diffusion implementation for illustration
-        self.diffuse();
-        self.advect();
-    }
-
-    // Simple diffusion: spreads velocity over neighboring cells
-    fn diffuse(&mut self) {
-        let visc = self.dt * VISCOSITY;
-        let mut new_velocity_x = vec![0.0; self.size * self.size];
-        let mut new_velocity_y = vec![0.0; self.size * self.size];
-
-        for y in 1..self.size - 1 {
-            for x in 1..self.size - 1 {
-                let idx = self.index(x, y);
-                let idx_left = self.index(x - 1, y);
-                let idx_right = self.index(x + 1, y);
-                let idx_up = self.index(x, y - 1);
-                let idx_down = self.index(x, y + 1);
-
-                new_velocity_x[idx] = self.velocity_x[idx]
-                    + visc
-                        * (self.velocity_x[idx_left]
-                            + self.velocity_x[idx_right]
-                            + self.velocity_x[idx_up]
-                            + self.velocity_x[idx_down]
-                            - 4.0 * self.velocity_x[idx]);
-                new_velocity_y[idx] = self.velocity_y[idx]
-                    + visc
-                        * (self.velocity_y[idx_left]
-                            + self.velocity_y[idx_right]
-                            + self.velocity_y[idx_up]
-                            + self.velocity_y[idx_down]
-                            - 4.0 * self.velocity_y[idx]);
+fn render_grid(canvas: &mut Canvas<Window>, grid: &Vec<Vec<Cell>>, solid: &Vec<Vec<bool>>) {
+    for (y, row) in grid.iter().enumerate() {
+        for (x, cell) in row.iter().enumerate() {
+            if solid[y][x] {
+                canvas.set_draw_color(Color::RGB(100, 100, 100)); // Solid objects as gray
+            } else {
+                let density_color = (cell.density * 25.5).min(255.0) as u8;
+                canvas.set_draw_color(Color::RGB(density_color, density_color, 255));
             }
+            let rect = Rect::new((x as i32) * 10, (y as i32) * 10, 10, 10);
+            let _ = canvas.fill_rect(rect);
         }
-
-        self.velocity_x = new_velocity_x;
-        self.velocity_y = new_velocity_y;
-    }
-
-    // Simple advection: move density and velocity based on the velocity field
-    fn advect(&self) {
-        let dt0 = self.dt * (self.size - 2) as f32;
-        let mut new_density = vec![0.0; self.size * self.size];
-        let mut new_velocity_x = vec![0.0; self.size * self.size];
-        let mut new_velocity_y = vec![0.0; self.size * self.size];
-
-        for y in 1..self.size - 1 {
-            for x in 1..self.size - 1 {
-                let idx = self.index(x, y);
-                let idx_left = self.index(x - 1, y);
-                let idx_right = self.index(x + 1, y);
-                let idx_up = self.index(x, y - 1);
-                let idx_down = self.index(x, y + 1);
-
-                let mut x = (x as f32) - dt0 * self.velocity_x[idx];
-                let mut y = (y as f32) - dt0 * self.velocity_y[idx];
-
-                if x < 0.5 {
-                    x = 0.5;
-                }
-                if x > self.size as f32 + 0.5 {
-                    x = self.size as f32 + 0.5;
-                }
-                let i0 = x as usize;
-                let i1 = i0 + 1;
-
-                if y < 0.5 {
-                    y = 0.5;
-                }
-                if y > self.size as f32 + 0.5 {
-                    y = self.size as f32 + 0.5;
-                }
-                let j0 = y as usize;
-                let j1 = j0 + 1;
-
-                let s1 = x - i0 as f32;
-                let s0 = 1.0 - s1;
-                let t1 = y - j0 as f32;
-                let t0 = 1.0 - t1;
-
-                let idx00 = self.index(i0, j0);
-                let idx01 = self.index(i0, j1);
-                let idx10 = self.index(i1, j0);
-                let idx11 = self.index(i1, j1);
-
-                new_density[idx] = s0 * (t0 * self.density[idx00] + t1 * self.density[idx01])
-                    + s1 * (t0 * self.density[idx10] + t1 * self.density[idx11]);
-                new_velocity_x[idx] = s0
-                    * (t0 * self.velocity_x[idx00] + t1 * self.velocity_x[idx01])
-                    + s1 * (t0 * self.velocity_x[idx10] + t1 * self.velocity_x[idx11]);
-                new_velocity_y[idx] = s0
-                    * (t0 * self.velocity_y[idx00] + t1 * self.velocity_y[idx01])
-                    + s1 * (t0 * self.velocity_y[idx10] + t1 * self.velocity_y[idx11]);
-            }
-        }
-    }
-
-    // Converts 2D grid coordinates to a 1D array index
-    fn index(&self, x: usize, y: usize) -> usize {
-        x + y * self.size
     }
 }
-// Main function
-fn main() -> Result<(), String> {
-    let sdl_context = sdl2::init()?;
-    let video_subsystem = sdl_context.video()?;
 
+fn initialize_grid(width: usize, height: usize) -> Vec<Vec<Cell>> {
+    let mut grid = vec![
+        vec![
+            Cell {
+                density: AIR_DENSITY,
+                momentum_x: 0.0,
+                momentum_y: 0.0,
+                energy: AIR_ENERGY,
+            };
+            width
+        ];
+        height
+    ];
+
+    // Set a high-pressure region in the center for initial movement
+    let center_x = width / 2;
+    let center_y = height / 2;
+    grid[center_y][center_x].density = 10.0;
+    grid[center_y][center_x].energy = 1000.0; // High energy in the center
+
+    grid
+}
+
+fn calculate_pressure(cell: &Cell, gamma: f64) -> f64 {
+    let kinetic_energy = (cell.momentum_x.powi(2) + cell.momentum_y.powi(2)) / (2.0 * cell.density);
+    let pressure = (gamma - 1.0) * (cell.energy - kinetic_energy);
+    pressure
+}
+
+fn calculate_fluxes(grid: &Vec<Vec<Cell>>, solid: &Vec<Vec<bool>>, gamma: f64) -> Vec<Vec<Cell>> {
+    let mut new_grid = grid.clone();
+
+    for y in 1..grid.len() - 1 {
+        for x in 1..grid[0].len() - 1 {
+            if solid[y][x] {
+                continue;
+            }
+
+            // Calculate pressure at current cell and its neighbors
+            let pressure = calculate_pressure(&grid[y][x], gamma);
+            let pressure_left = calculate_pressure(&grid[y][x - 1], gamma);
+            let pressure_right = calculate_pressure(&grid[y][x + 1], gamma);
+            let pressure_up = calculate_pressure(&grid[y - 1][x], gamma);
+            let pressure_down = calculate_pressure(&grid[y + 1][x], gamma);
+
+            // Calculate pressure gradients
+            let pressure_flux_x = (pressure_right - pressure_left) / 2.0;
+            let pressure_flux_y = (pressure_down - pressure_up) / 2.0;
+
+            // Calculate density flux for stability
+            let density_flux_x = (grid[y][x + 1].density - grid[y][x - 1].density) / 2.0;
+            let density_flux_y = (grid[y + 1][x].density - grid[y - 1][x].density) / 2.0;
+
+            // Apply pressure flux to momentum to maintain movement
+            new_grid[y][x].momentum_x -= pressure_flux_x + density_flux_x * pressure / 2.0;
+            new_grid[y][x].momentum_y -= pressure_flux_y + density_flux_y * pressure / 2.0;
+
+            // Calculate average density and energy to update the cell
+            let avg_density = (grid[y][x].density
+                + grid[y - 1][x].density
+                + grid[y + 1][x].density
+                + grid[y][x - 1].density
+                + grid[y][x + 1].density)
+                / 5.0;
+
+            let avg_energy = (grid[y][x].energy
+                + grid[y - 1][x].energy
+                + grid[y + 1][x].energy
+                + grid[y][x - 1].energy
+                + grid[y][x + 1].energy)
+                / 5.0;
+
+            // Update density and energy based on calculated fluxes
+            new_grid[y][x].density = avg_density;
+            new_grid[y][x].energy = avg_energy;
+        }
+    }
+
+    new_grid
+}
+
+fn update_grid(grid: &mut Vec<Vec<Cell>>, new_grid: Vec<Vec<Cell>>) {
+    *grid = new_grid;
+}
+
+fn add_fluid_source(
+    grid: &mut Vec<Vec<Cell>>,
+    width: usize,
+    emission_rate: f64,
+    fluid_velocity: f64,
+) {
+    let height = grid.len();
+    let center_y = height / 2;
+
+    for y in center_y - width / 2..center_y + width / 2 {
+        grid[y][0].density += emission_rate;
+        grid[y][0].momentum_x = fluid_velocity;
+        grid[y][0].energy += AIR_ENERGY;
+    }
+}
+
+fn create_solid_object(width: usize, height: usize) -> Vec<Vec<bool>> {
+    let mut solid_object = vec![vec![false; width]; height];
+
+    for y in 20..40 {
+        for x in 30..50 {
+            solid_object[y][x] = true;
+        }
+    }
+
+    solid_object
+}
+
+fn main() {
+    let sdl_context: Sdl = sdl2::init().unwrap();
+    let video_subsystem = sdl_context.video().unwrap();
     let window = video_subsystem
-        .window(
-            "Euler Fluid Simulation",
-            (WIDTH * SCALE) as u32,
-            (HEIGHT * SCALE) as u32,
-        )
+        .window("Euler Fluid Simulation with Solid Objects", 800, 600)
         .position_centered()
         .build()
-        .map_err(|e| e.to_string())?;
+        .unwrap();
+    let mut canvas = window.into_canvas().build().unwrap();
 
-    let mut canvas = window.into_canvas().build().map_err(|e| e.to_string())?;
+    let mut grid = initialize_grid(80, 60);
+    let solid_object = create_solid_object(80, 60);
 
-    let mut event_pump = sdl_context.event_pump()?;
+    let mut event_pump = sdl_context.event_pump().unwrap();
 
-    let mut fluid = Fluid::new(WIDTH, 0.1);
-
-    // Main loop
     'running: loop {
-        // Handle events
         for event in event_pump.poll_iter() {
             match event {
                 Event::Quit { .. }
                 | Event::KeyDown {
                     keycode: Some(Keycode::Escape),
                     ..
-                } => {
-                    break 'running;
-                }
-                // Add density and velocity on mouse click
-                Event::MouseButtonDown { x, y, .. } => {
-                    let fx = x as usize / SCALE;
-                    let fy = y as usize / SCALE;
-                    fluid.add_density(fx, fy, 100.0);
-                    fluid.add_velocity(fx, fy, 10.0, 0.0);
-                }
+                } => break 'running,
                 _ => {}
             }
         }
 
-        // Step the fluid simulation
-        fluid.step();
-
-        // Rendering
+        // Clear the screen
         canvas.set_draw_color(Color::RGB(0, 0, 0));
         canvas.clear();
 
-        // Draw the density as grayscale
-        for y in 0..HEIGHT {
-            for x in 0..WIDTH {
-                let idx = fluid.index(x, y);
-                let density = (fluid.density[idx] * 255.0) as u8;
-                canvas.set_draw_color(Color::RGB(density, density, density));
-                canvas.fill_rect(Rect::new(
-                    (x * SCALE) as i32,
-                    (y * SCALE) as i32,
-                    SCALE as u32,
-                    SCALE as u32,
-                ))?;
-            }
-        }
+        // Add a fluid source on the left
+        add_fluid_source(&mut grid, 20, 1000.0, 650.0); // Reduced velocity for stability
 
+        // Update the fluid grid using the new flux calculations
+        let new_grid = calculate_fluxes(&grid, &solid_object, GAMMA_AIR);
+        update_grid(&mut grid, new_grid);
+
+        // Render the grid and solid object
+        render_grid(&mut canvas, &grid, &solid_object);
+
+        // Present the canvas
         canvas.present();
 
-        // Control the frame rate
-        ::std::thread::sleep(Duration::from_millis(16));
+        // Control frame rate
+        std::thread::sleep(Duration::from_millis(1)); // Approx 60 FPS
     }
-
-    Ok(())
 }
